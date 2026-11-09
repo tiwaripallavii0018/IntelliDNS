@@ -1,89 +1,81 @@
 import logging
 import time
 import threading
-from pathlib import Path
 
 import dns.message
 import dns.query
+import dns.rcode
 
 from dnslib import DNSRecord
 
-from dns_engine.cache import DNSCache
-from threat_intelligence.blacklist import DomainBlacklist
-from threat_intelligence.stix_feed import STIXFeedLoader
-
 from monitoring.database import (
     initialize_database,
-    save_query
+    save_query,
+    is_ip_blocked
 )
 
+from security.alert_manager import AlertManager
 from security.rate_limiter import RateLimiter
 from security.domain_analyzer import analyze_domain
 from security.tunneling_detector import TunnelingDetector
 from security.anomaly_detector import AnomalyDetector
-from security.alert_manager import AlertManager
+
+
+logging.basicConfig(level=logging.INFO)
+
+logger = logging.getLogger("IntelliDNS")
+
+
+class DNSCache:
+
+    def __init__(self, ttl=60):
+        self.ttl = ttl
+        self.cache = {}
+        self.lock = threading.Lock()
+
+    def get(self, domain, qtype):
+        key = (domain, qtype)
+
+        with self.lock:
+            item = self.cache.get(key)
+
+            if not item:
+                return None
+
+            data, expiry = item
+
+            if time.time() > expiry:
+                del self.cache[key]
+                return None
+
+            return data
+
+    def set(self, domain, qtype, data):
+        key = (domain, qtype)
+
+        with self.lock:
+            self.cache[key] = (
+                data,
+                time.time() + self.ttl
+            )
 
 
 class IntelliDNSResolver:
 
-    def __init__(self, upstream="1.1.1.1"):
-
-        self.upstream = upstream
-
+    def __init__(self):
         initialize_database()
 
-        self.blacklist = DomainBlacklist()
         self.cache = DNSCache()
-
-        # Load STIX threat intelligence.
-
-        feed_path = (
-            Path(__file__).resolve().parents[1]
-            / "threat_intelligence"
-            / "feeds"
-            / "local_stix_bundle.json"
-        )
-
-        self.stix_loader = STIXFeedLoader()
-
-        stix_domains = self.stix_loader.load_domains(
-            feed_path
-        )
-
-        self.blacklist.add_domains(stix_domains)
-
-        logging.info(
-            "THREAT INTELLIGENCE READY | TOTAL DOMAINS=%d",
-            len(self.blacklist.get_domains())
-        )
-
-        # Initialize security modules.
-
         self.rate_limiter = RateLimiter()
-
         self.tunneling_detector = TunnelingDetector()
-
         self.anomaly_detector = AnomalyDetector()
-
         self.alert_manager = AlertManager()
 
-        # DNS statistics.
-
-        self.stats = {
-            "total_queries": 0,
-            "blocked_queries": 0,
-            "allowed_queries": 0,
-            "cache_hits": 0,
-            "cache_misses": 0,
-            "errors": 0
-        }
+        self.total_queries = 0
+        self.blocked_queries = 0
+        self.failed_queries = 0
 
         self.stats_lock = threading.Lock()
-
-    def update_stats(self, key):
-
-        with self.stats_lock:
-            self.stats[key] += 1
 
     def create_alert(
         self,
@@ -93,282 +85,165 @@ class IntelliDNSResolver:
         severity,
         details
     ):
+        self.alert_manager.raise_alert(
+            alert_type,
+            client_ip,
+            domain,
+            severity,
+            details
+        )
 
-        try:
-
-            created = self.alert_manager.raise_alert(
-                alert_type,
-                client_ip,
-                domain,
-                severity,
-                details
-            )
-
-            if created:
-
-                logging.warning(
-                    "SECURITY ALERT | TYPE=%s | IP=%s | DOMAIN=%s",
-                    alert_type,
-                    client_ip,
-                    domain
-                )
-
-        except Exception as error:
-
-            logging.error(
-                "ALERT ERROR | %s",
-                str(error)
-            )
+    def make_response(self, data, rcode):
+        request = DNSRecord.parse(data)
+        response = request.reply()
+        response.header.rcode = rcode
+        return response.pack()
 
     def process_query(self, data, client_ip):
+        start_time = time.time()
 
-        start_time = time.perf_counter()
-
-        domain = "UNKNOWN"
+        domain = "unknown"
         status = "ERROR"
 
         try:
-
-            # Parse DNS request.
-
             request = DNSRecord.parse(data)
 
             if not request.questions:
-                return None
+                return self.make_response(data, 1)
 
             question = request.questions[0]
 
-            domain = str(question.qname).lower().rstrip(".")
-
+            domain = str(question.qname).rstrip(".")
             qtype = question.qtype
-            qclass = question.qclass
 
-            self.update_stats("total_queries")
+            with self.stats_lock:
+                self.total_queries += 1
 
-            # 1. Rate limiting.
-
-            allowed, retry_after = (
-                self.rate_limiter.allow_request(client_ip)
-            )
-
-            if not allowed:
-
-                self.update_stats("blocked_queries")
-
+            if is_ip_blocked(client_ip):
+                self.blocked_queries += 1
                 status = "BLOCKED"
 
                 self.create_alert(
-                    "RATE_LIMIT",
+                    "blocked_ip_query",
                     client_ip,
                     domain,
                     "HIGH",
-                    {
-                        "message": "Client exceeded DNS request limit",
-                        "retry_after_seconds": retry_after
-                    }
+                    "Query received from a blocked IP"
                 )
 
-                response = request.reply()
+                return self.make_response(data, 5)
 
-                response.header.rcode = 5
-
-                logging.warning(
-                    "RATE LIMITED | IP=%s | DOMAIN=%s",
-                    client_ip,
-                    domain
-                )
-
-                return response.pack()
-
-            # 2. Suspicious domain analysis.
-
-            domain_result = analyze_domain(domain)
-
-            if domain_result["is_suspicious"]:
-
-                severity = (
-                    "HIGH"
-                    if domain_result["risk_score"] >= 70
-                    else "MEDIUM"
-                )
+            if not self.rate_limiter.allow_request(client_ip):
+                self.blocked_queries += 1
+                status = "RATE_LIMITED"
 
                 self.create_alert(
-                    "SUSPICIOUS_DOMAIN",
-                    client_ip,
-                    domain,
-                    severity,
-                    domain_result
-                )
-
-            # 3. DNS tunneling detection.
-
-            tunnel_result = self.tunneling_detector.detect(
-                domain
-            )
-
-            if tunnel_result["is_tunneling"]:
-
-                self.create_alert(
-                    "DNS_TUNNELING",
-                    client_ip,
-                    domain,
-                    "HIGH",
-                    tunnel_result
-                )
-
-            # 4. Client anomaly detection.
-
-            anomaly_result = self.anomaly_detector.check_activity(
-                client_ip,
-                domain
-            )
-
-            if anomaly_result["is_anomaly"]:
-
-                self.create_alert(
-                    "ANOMALOUS_ACTIVITY",
+                    "rate_limit_exceeded",
                     client_ip,
                     domain,
                     "MEDIUM",
-                    anomaly_result
+                    "Client exceeded DNS request rate"
                 )
 
-            # 5. Check existing blacklist.
+                return self.make_response(data, 5)
 
-            if self.blacklist.is_blocked(domain):
+            try:
+                analysis = analyze_domain(domain)
 
-                response = request.reply()
+                if analysis:
+                    if isinstance(analysis, dict) and analysis.get("suspicious"):
+                        self.create_alert(
+                            "suspicious_domain",
+                            client_ip,
+                            domain,
+                            "HIGH",
+                            analysis
+                        )
+            except Exception as error:
+                logger.warning("Domain analysis error: %s", error)
 
-                response.header.rcode = 3
+            try:
+                tunneling_result = self.tunneling_detector.detect(domain)
 
-                self.update_stats("blocked_queries")
+                if tunneling_result:
+                    self.create_alert(
+                        "dns_tunneling",
+                        client_ip,
+                        domain,
+                        "HIGH",
+                        str(tunneling_result)
+                    )
+            except Exception as error:
+                logger.warning("Tunneling detection error: %s", error)
 
-                status = "BLOCKED"
-
-                logging.warning(
-                    "BLOCKED | IP=%s | DOMAIN=%s",
+            try:
+                anomaly_result = self.anomaly_detector.detect(
                     client_ip,
                     domain
                 )
 
-                return response.pack()
+                if anomaly_result:
+                    self.create_alert(
+                        "dns_anomaly",
+                        client_ip,
+                        domain,
+                        "MEDIUM",
+                        str(anomaly_result)
+                    )
+            except Exception as error:
+                logger.warning("Anomaly detection error: %s", error)
 
-            # 6. Check DNS cache.
+            cached_response = self.cache.get(domain, qtype)
 
-            cache_key = (domain, qtype, qclass)
-
-            cached_response = self.cache.get(
-                cache_key,
-                request.header.id
-            )
-
-            if cached_response is not None:
-
-                self.update_stats("cache_hits")
-                self.update_stats("allowed_queries")
-
-                status = "ALLOWED"
-
-                logging.info(
-                    "CACHE HIT | IP=%s | DOMAIN=%s",
-                    client_ip,
-                    domain
-                )
-
+            if cached_response:
+                status = "CACHED"
                 return cached_response
 
-            self.update_stats("cache_misses")
-
-            # 7. Forward request to upstream DNS.
-
-            upstream_request = dns.message.from_wire(data)
-
-            upstream_response = dns.query.udp(
-                upstream_request,
-                self.upstream,
+            response = dns.query.udp(
+                dns.message.from_wire(data),
+                "1.1.1.1",
                 timeout=3
             )
 
-            response_data = upstream_response.to_wire()
+            response_data = response.to_wire()
 
-            response = DNSRecord.parse(response_data)
+            self.cache.set(domain, qtype, response_data)
 
-            response.header.id = request.header.id
+            status = "SUCCESS"
 
-            # 8. Cache successful response.
-
-            self.cache.set(
-                cache_key,
-                response.pack()
-            )
-
-            self.update_stats("allowed_queries")
-
-            status = "ALLOWED"
-
-            logging.info(
-                "ALLOWED | IP=%s | DOMAIN=%s",
-                client_ip,
-                domain
-            )
-
-            return response.pack()
+            return response_data
 
         except Exception as error:
+            logger.error("DNS resolver error: %s", error)
 
-            self.update_stats("errors")
+            with self.stats_lock:
+                self.failed_queries += 1
 
             status = "ERROR"
 
-            logging.error(
-                "DNS ERROR | IP=%s | ERROR=%s",
-                client_ip,
-                str(error)
-            )
-
             try:
-
-                request = DNSRecord.parse(data)
-
-                response = request.reply()
-
-                response.header.rcode = 2
-
-                return response.pack()
-
+                return self.make_response(data, 2)
             except Exception:
-
-                return None
+                return b""
 
         finally:
-
-            elapsed = (
-                time.perf_counter() - start_time
-            ) * 1000
-
-            logging.info(
-                "QUERY TIME | IP=%s | %.2f ms",
-                client_ip,
-                elapsed
-            )
+            elapsed = time.time() - start_time
 
             try:
-
                 save_query(
                     domain,
                     client_ip,
                     status,
-                    round(elapsed, 2)
+                    elapsed
                 )
-
             except Exception as error:
-
-                logging.error(
-                    "MONITORING ERROR | %s",
-                    str(error)
-                )
+                logger.error("Could not save DNS query: %s", error)
 
     def get_stats(self):
-
         with self.stats_lock:
-            return self.stats.copy()
+            return {
+                "total_queries": self.total_queries,
+                "blocked_queries": self.blocked_queries,
+                "failed_queries": self.failed_queries,
+                "cache_entries": len(self.cache.cache)
+            }

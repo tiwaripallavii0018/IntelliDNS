@@ -1,469 +1,498 @@
 import { useEffect, useState } from "react";
-
-import {
-  BarChart,
-  Bar,
-  XAxis,
-  YAxis,
-  Tooltip,
-  ResponsiveContainer
-} from "recharts";
-
-import {
-  ShieldCheck,
-  ShieldAlert,
-  Activity,
-  Globe,
-  AlertTriangle,
-  RefreshCw,
-  Clock
-} from "lucide-react";
-
 import "./App.css";
 
 const API = "http://127.0.0.1:8000";
 
 function App() {
+    const [stats, setStats] = useState({});
+    const [queries, setQueries] = useState([]);
+    const [domains, setDomains] = useState([]);
+    const [alerts, setAlerts] = useState([]);
+    const [securityStats, setSecurityStats] = useState({});
+    const [incidents, setIncidents] = useState([]);
+    const [blockedIps, setBlockedIps] = useState([]);
+    const [lastUpdated, setLastUpdated] = useState("");
 
-  const [stats, setStats] = useState({});
-  const [queries, setQueries] = useState([]);
-  const [domains, setDomains] = useState([]);
-  const [alerts, setAlerts] = useState([]);
-  const [securityStats, setSecurityStats] = useState({});
-  const [lastUpdated, setLastUpdated] = useState("");
+    const [message, setMessage] = useState("");
+    const [loading, setLoading] = useState(false);
 
-  async function loadData() {
+    async function fetchData(url) {
+        const response = await fetch(API + url);
 
-    try {
+        if (!response.ok) {
+            throw new Error("API request failed: " + url);
+        }
 
-      const [
-        statsRes,
-        queriesRes,
-        domainsRes,
-        alertsRes,
-        securityRes
-      ] = await Promise.all([
-        fetch(`${API}/api/stats`),
-        fetch(`${API}/api/queries`),
-        fetch(`${API}/api/top-domains`),
-        fetch(`${API}/api/alerts`),
-        fetch(`${API}/api/security-stats`)
-      ]);
-
-      if (
-        !statsRes.ok ||
-        !queriesRes.ok ||
-        !domainsRes.ok ||
-        !alertsRes.ok ||
-        !securityRes.ok
-      ) {
-        throw new Error("One or more API requests failed");
-      }
-
-      setStats(await statsRes.json());
-      setQueries(await queriesRes.json());
-      setDomains(await domainsRes.json());
-      setAlerts(await alertsRes.json());
-      setSecurityStats(await securityRes.json());
-
-      setLastUpdated(new Date().toLocaleTimeString());
-
-    } catch (error) {
-
-      console.error("Dashboard API error:", error);
-
-    }
-  }
-
-  useEffect(() => {
-
-    loadData();
-
-    const interval = setInterval(loadData, 3000);
-
-    return () => clearInterval(interval);
-
-  }, []);
-
-  const cards = [
-    {
-      title: "Total Queries",
-      value: stats.total_queries || 0,
-      icon: <Activity />
-    },
-    {
-      title: "Allowed Queries",
-      value: stats.allowed_queries || 0,
-      icon: <ShieldCheck />
-    },
-    {
-      title: "Blocked Queries",
-      value: stats.blocked_queries || 0,
-      icon: <ShieldAlert />
-    },
-    {
-      title: "Avg Response Time",
-      value: `${stats.average_response_time || 0} ms`,
-      icon: <Globe />
-    }
-  ];
-
-  const alertCounts = {
-    HIGH: securityStats.HIGH || 0,
-    MEDIUM: securityStats.MEDIUM || 0,
-    LOW: securityStats.LOW || 0
-  };
-
-  function formatTime(value) {
-
-    if (!value) {
-      return "N/A";
+        return response.json();
     }
 
-    return new Date(value).toLocaleString();
+    async function loadData() {
+        try {
+            const results = await Promise.all([
+                fetchData("/api/stats"),
+                fetchData("/api/queries"),
+                fetchData("/api/top-domains"),
+                fetchData("/api/alerts"),
+                fetchData("/api/security-stats"),
+                fetchData("/api/incidents"),
+                fetchData("/api/blocked-ips")
+            ]);
 
-  }
+            setStats(results[0] || {});
+            setQueries(results[1] || []);
+            setDomains(results[2] || []);
+            setAlerts(results[3] || []);
+            setSecurityStats(results[4] || {});
+            setIncidents(results[5] || []);
+            setBlockedIps(results[6] || []);
 
-  return (
+            setLastUpdated(new Date().toLocaleTimeString());
+        } catch (error) {
+            setMessage("Unable to connect to IntelliDNS API.");
+            console.error(error);
+        }
+    }
 
-    <div className="dashboard">
+    useEffect(() => {
+        loadData();
 
-      <header className="topbar">
+        const interval = setInterval(loadData, 5000);
 
-        <div className="brand">
+        return () => clearInterval(interval);
+    }, []);
 
-          <div className="brand-icon">
-            <ShieldCheck size={25} />
-          </div>
+    async function acknowledgeIncident(id) {
+        try {
+            setLoading(true);
 
-          <div>
-            <h1>IntelliDNS</h1>
-            <p>DNS Security Monitoring Platform</p>
-          </div>
+            const response = await fetch(
+                `${API}/api/incidents/${id}/acknowledge`,
+                { method: "POST" }
+            );
 
+            const data = await response.json();
+
+            if (!response.ok) {
+                throw new Error(data.detail || "Action failed");
+            }
+
+            setMessage("Incident #" + id + " acknowledged.");
+            await loadData();
+        } catch (error) {
+            setMessage(error.message);
+        } finally {
+            setLoading(false);
+        }
+    }
+
+    async function resolveIncident(id) {
+        const note = window.prompt(
+            "Enter resolution note:",
+            "Resolved by administrator"
+        );
+
+        if (note === null) return;
+
+        try {
+            setLoading(true);
+
+            const response = await fetch(
+                `${API}/api/incidents/${id}/resolve`,
+                {
+                    method: "POST",
+                    headers: {
+                        "Content-Type": "application/json"
+                    },
+                    body: JSON.stringify({ note })
+                }
+            );
+
+            const data = await response.json();
+
+            if (!response.ok) {
+                throw new Error(data.detail || "Action failed");
+            }
+
+            setMessage("Incident #" + id + " resolved.");
+            await loadData();
+        } catch (error) {
+            setMessage(error.message);
+        } finally {
+            setLoading(false);
+        }
+    }
+
+    async function unblockIP(ip) {
+        if (!window.confirm("Unblock " + ip + "?")) return;
+
+        try {
+            setLoading(true);
+
+            const response = await fetch(
+                `${API}/api/blocked-ips/${encodeURIComponent(ip)}`,
+                { method: "DELETE" }
+            );
+
+            const data = await response.json();
+
+            if (!response.ok) {
+                throw new Error(data.detail || "Unblock failed");
+            }
+
+            setMessage(ip + " unblocked successfully.");
+            await loadData();
+        } catch (error) {
+            setMessage(error.message);
+        } finally {
+            setLoading(false);
+        }
+    }
+
+    const severity = securityStats.severity || {};
+    const incidentCounts = securityStats.incidents || {};
+
+    return (
+        <div className="app">
+            <header className="header">
+                <div>
+                    <h1>IntelliDNS</h1>
+                    <p>Intelligent DNS Security Dashboard</p>
+                </div>
+
+                <div className="header-right">
+                    <span className="live-dot"></span>
+                    System Live
+                    <button onClick={loadData}>Refresh</button>
+                </div>
+            </header>
+
+            <main className="container">
+                {message && (
+                    <div className="message">
+                        <span>{message}</span>
+                        <button onClick={() => setMessage("")}>×</button>
+                    </div>
+                )}
+
+                <section>
+                    <h2>Network Overview</h2>
+
+                    <div className="cards">
+                        <div className="card">
+                            <span>Total DNS Queries</span>
+                            <strong>{stats.total_queries || 0}</strong>
+                        </div>
+
+                        <div className="card">
+                            <span>Blocked Queries</span>
+                            <strong>{stats.blocked_queries || 0}</strong>
+                        </div>
+
+                        <div className="card">
+                            <span>Average Response Time</span>
+                            <strong>
+                                {Number(stats.avg_response_time || 0).toFixed(4)} s
+                            </strong>
+                        </div>
+
+                        <div className="card">
+                            <span>Active IP Blocks</span>
+                            <strong>{blockedIps.length}</strong>
+                        </div>
+                    </div>
+                </section>
+
+                <section>
+                    <h2>Security Overview</h2>
+
+                    <div className="cards">
+                        <div className="card severity-low">
+                            <span>Low Alerts</span>
+                            <strong>{severity.LOW || 0}</strong>
+                        </div>
+
+                        <div className="card severity-medium">
+                            <span>Medium Alerts</span>
+                            <strong>{severity.MEDIUM || 0}</strong>
+                        </div>
+
+                        <div className="card severity-high">
+                            <span>High Alerts</span>
+                            <strong>{severity.HIGH || 0}</strong>
+                        </div>
+
+                        <div className="card severity-critical">
+                            <span>Critical Alerts</span>
+                            <strong>{severity.CRITICAL || 0}</strong>
+                        </div>
+                    </div>
+                </section>
+
+                <section>
+                    <h2>Incident Management</h2>
+
+                    <div className="cards">
+                        <div className="card">
+                            <span>Open</span>
+                            <strong>{incidentCounts.OPEN || 0}</strong>
+                        </div>
+
+                        <div className="card">
+                            <span>Acknowledged</span>
+                            <strong>{incidentCounts.ACKNOWLEDGED || 0}</strong>
+                        </div>
+
+                        <div className="card">
+                            <span>Resolved</span>
+                            <strong>{incidentCounts.RESOLVED || 0}</strong>
+                        </div>
+                    </div>
+
+                    <div className="panel">
+                        <div className="panel-heading">
+                            <h3>All Incidents</h3>
+                            <span>{incidents.length} records</span>
+                        </div>
+
+                        <div className="table-wrap">
+                            <table>
+                                <thead>
+                                    <tr>
+                                        <th>ID</th>
+                                        <th>Title</th>
+                                        <th>Client IP</th>
+                                        <th>Domain</th>
+                                        <th>Severity</th>
+                                        <th>Status</th>
+                                        <th>Actions</th>
+                                    </tr>
+                                </thead>
+
+                                <tbody>
+                                    {incidents.map((incident) => (
+                                        <tr key={incident.id}>
+                                            <td>#{incident.id}</td>
+                                            <td>{incident.title}</td>
+                                            <td>{incident.client_ip}</td>
+                                            <td>{incident.domain}</td>
+                                            <td>
+                                                <span className={
+                                                    "tag " +
+                                                    String(incident.severity).toLowerCase()
+                                                }>
+                                                    {incident.severity}
+                                                </span>
+                                            </td>
+                                            <td>
+                                                <span className={
+                                                    "tag " +
+                                                    String(incident.status).toLowerCase()
+                                                }>
+                                                    {incident.status}
+                                                </span>
+                                            </td>
+                                            <td>
+                                                {incident.status === "OPEN" && (
+                                                    <button
+                                                        disabled={loading}
+                                                        onClick={() =>
+                                                            acknowledgeIncident(incident.id)
+                                                        }
+                                                    >
+                                                        Acknowledge
+                                                    </button>
+                                                )}
+
+                                                {incident.status !== "RESOLVED" && (
+                                                    <button
+                                                        className="resolve-button"
+                                                        disabled={loading}
+                                                        onClick={() =>
+                                                            resolveIncident(incident.id)
+                                                        }
+                                                    >
+                                                        Resolve
+                                                    </button>
+                                                )}
+                                            </td>
+                                        </tr>
+                                    ))}
+
+                                    {incidents.length === 0 && (
+                                        <tr>
+                                            <td colSpan="7" className="empty">
+                                                No incidents found.
+                                            </td>
+                                        </tr>
+                                    )}
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </section>
+
+                <section>
+                    <h2>Blocked IP Addresses</h2>
+
+                    <div className="panel">
+                        <div className="panel-heading">
+                            <h3>Active Blocks</h3>
+                            <span>{blockedIps.length} active</span>
+                        </div>
+
+                        <div className="table-wrap">
+                            <table>
+                                <thead>
+                                    <tr>
+                                        <th>IP Address</th>
+                                        <th>Reason</th>
+                                        <th>Duration</th>
+                                        <th>Expires At</th>
+                                        <th>Action</th>
+                                    </tr>
+                                </thead>
+
+                                <tbody>
+                                    {blockedIps.map((item) => (
+                                        <tr key={item.id}>
+                                            <td>{item.client_ip}</td>
+                                            <td>{item.reason}</td>
+                                            <td>{item.duration}s</td>
+                                            <td>{item.expires_at}</td>
+                                            <td>
+                                                <button
+                                                    className="resolve-button"
+                                                    disabled={loading}
+                                                    onClick={() =>
+                                                        unblockIP(item.client_ip)
+                                                    }
+                                                >
+                                                    Unblock
+                                                </button>
+                                            </td>
+                                        </tr>
+                                    ))}
+
+                                    {blockedIps.length === 0 && (
+                                        <tr>
+                                            <td colSpan="5" className="empty">
+                                                No active IP blocks.
+                                            </td>
+                                        </tr>
+                                    )}
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </section>
+
+                <section>
+                    <h2>Recent Security Alerts</h2>
+
+                    <div className="panel">
+                        <div className="table-wrap">
+                            <table>
+                                <thead>
+                                    <tr>
+                                        <th>Type</th>
+                                        <th>Client IP</th>
+                                        <th>Domain</th>
+                                        <th>Severity</th>
+                                        <th>Time</th>
+                                    </tr>
+                                </thead>
+
+                                <tbody>
+                                    {alerts.map((alert) => (
+                                        <tr key={alert.id}>
+                                            <td>{alert.alert_type}</td>
+                                            <td>{alert.client_ip}</td>
+                                            <td>{alert.domain}</td>
+                                            <td>{alert.severity}</td>
+                                            <td>{alert.timestamp}</td>
+                                        </tr>
+                                    ))}
+
+                                    {alerts.length === 0 && (
+                                        <tr>
+                                            <td colSpan="5" className="empty">
+                                                No security alerts found.
+                                            </td>
+                                        </tr>
+                                    )}
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </section>
+
+                <section>
+                    <h2>Most Queried Domains</h2>
+
+                    <div className="panel">
+                        {domains.map((item, index) => (
+                            <div className="domain-row" key={item.domain}>
+                                <span>{index + 1}. {item.domain}</span>
+                                <strong>{item.count}</strong>
+                            </div>
+                        ))}
+
+                        {domains.length === 0 && (
+                            <p className="empty">No domain data available.</p>
+                        )}
+                    </div>
+                </section>
+
+                <section>
+                    <h2>Recent DNS Activity</h2>
+
+                    <div className="panel">
+                        <div className="table-wrap">
+                            <table>
+                                <thead>
+                                    <tr>
+                                        <th>Domain</th>
+                                        <th>Client IP</th>
+                                        <th>Status</th>
+                                        <th>Response Time</th>
+                                        <th>Timestamp</th>
+                                    </tr>
+                                </thead>
+
+                                <tbody>
+                                    {queries.map((query) => (
+                                        <tr key={query.id}>
+                                            <td>{query.domain}</td>
+                                            <td>{query.client_ip}</td>
+                                            <td>{query.status}</td>
+                                            <td>
+                                                {Number(query.response_time || 0).toFixed(4)}s
+                                            </td>
+                                            <td>{query.timestamp}</td>
+                                        </tr>
+                                    ))}
+
+                                    {queries.length === 0 && (
+                                        <tr>
+                                            <td colSpan="5" className="empty">
+                                                No DNS activity found.
+                                            </td>
+                                        </tr>
+                                    )}
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </section>
+
+                <footer>
+                    IntelliDNS | Automated Threat Response & Incident Management
+                    <br />
+                    Last updated: {lastUpdated || "Waiting for data"}
+                </footer>
+            </main>
         </div>
-
-        <div className="header-right">
-
-          <span className="online">
-            <span className="online-dot"></span>
-            Monitoring
-          </span>
-
-          <button
-            className="refresh-button"
-            onClick={loadData}
-            title="Refresh dashboard"
-          >
-            <RefreshCw size={16} />
-            Refresh
-          </button>
-
-        </div>
-
-      </header>
-
-
-      <main>
-
-        <section className="section-heading">
-
-          <div>
-            <h2>Network Overview</h2>
-            <p>Live DNS traffic and security monitoring</p>
-          </div>
-
-          <span className="updated">
-            <Clock size={14} />
-            Updated: {lastUpdated || "Loading..."}
-          </span>
-
-        </section>
-
-
-        <section className="cards">
-
-          {cards.map((card) => (
-
-            <div className="card" key={card.title}>
-
-              <div className="card-icon">
-                {card.icon}
-              </div>
-
-              <p>{card.title}</p>
-              <h2>{card.value}</h2>
-
-            </div>
-
-          ))}
-
-        </section>
-
-
-        <section className="section-heading security-heading">
-
-          <div>
-            <h2>Security Overview</h2>
-            <p>Threat detection and security alerts</p>
-          </div>
-
-          <div className="alert-total">
-            <ShieldAlert size={17} />
-            {alerts.length} Recent Alerts
-          </div>
-
-        </section>
-
-
-        <section className="security-cards">
-
-          <div className="security-card high-card">
-
-            <div className="security-icon">
-              <ShieldAlert />
-            </div>
-
-            <div>
-              <p>High Severity</p>
-              <h2>{alertCounts.HIGH}</h2>
-            </div>
-
-          </div>
-
-
-          <div className="security-card medium-card">
-
-            <div className="security-icon">
-              <AlertTriangle />
-            </div>
-
-            <div>
-              <p>Medium Severity</p>
-              <h2>{alertCounts.MEDIUM}</h2>
-            </div>
-
-          </div>
-
-
-          <div className="security-card low-card">
-
-            <div className="security-icon">
-              <ShieldCheck />
-            </div>
-
-            <div>
-              <p>Low Severity</p>
-              <h2>{alertCounts.LOW}</h2>
-            </div>
-
-          </div>
-
-        </section>
-
-
-        <section className="panel">
-
-          <div className="panel-heading">
-            <div>
-              <h2>Recent Security Alerts</h2>
-              <p>Suspicious activity detected by IntelliDNS</p>
-            </div>
-
-            <span className="live-label">
-              LIVE
-            </span>
-          </div>
-
-
-          {alerts.length === 0 ? (
-
-            <div className="empty-state">
-
-              <ShieldCheck size={35} />
-
-              <h3>No security alerts yet</h3>
-
-              <p>
-                No suspicious DNS activity has been recorded.
-                Alerts will appear here when detected.
-              </p>
-
-            </div>
-
-          ) : (
-
-            <div className="table-wrap">
-
-              <table>
-
-                <thead>
-                  <tr>
-                    <th>Alert Type</th>
-                    <th>Domain</th>
-                    <th>Client IP</th>
-                    <th>Severity</th>
-                    <th>Timestamp</th>
-                  </tr>
-                </thead>
-
-                <tbody>
-
-                  {alerts.map((alert) => (
-
-                    <tr key={alert.id}>
-
-                      <td className="alert-type">
-                        {alert.alert_type.replaceAll("_", " ")}
-                      </td>
-
-                      <td>{alert.domain || "N/A"}</td>
-
-                      <td>{alert.client_ip || "N/A"}</td>
-
-                      <td>
-                        <span
-                          className={`severity ${(
-                            alert.severity || "LOW"
-                          ).toLowerCase()}`}
-                        >
-                          {alert.severity || "LOW"}
-                        </span>
-                      </td>
-
-                      <td>{formatTime(alert.timestamp)}</td>
-
-                    </tr>
-
-                  ))}
-
-                </tbody>
-
-              </table>
-
-            </div>
-
-          )}
-
-        </section>
-
-
-        <section className="panel">
-
-          <h2>Most Queried Domains</h2>
-
-          <div className="chart-container">
-
-            {domains.length === 0 ? (
-
-              <div className="empty-small">
-                No domain data available yet.
-              </div>
-
-            ) : (
-
-              <ResponsiveContainer width="100%" height={280}>
-
-                <BarChart data={domains}>
-
-                  <XAxis
-                    dataKey="domain"
-                    tick={{ fontSize: 11 }}
-                    interval={0}
-                  />
-
-                  <YAxis />
-
-                  <Tooltip />
-
-                  <Bar
-                    dataKey="count"
-                    fill="#36a68a"
-                    radius={[6, 6, 0, 0]}
-                  />
-
-                </BarChart>
-
-              </ResponsiveContainer>
-
-            )}
-
-          </div>
-
-        </section>
-
-
-        <section className="panel">
-
-          <h2>Recent DNS Activity</h2>
-
-          {queries.length === 0 ? (
-
-            <div className="empty-small">
-              No DNS queries recorded yet.
-            </div>
-
-          ) : (
-
-            <div className="table-wrap">
-
-              <table>
-
-                <thead>
-                  <tr>
-                    <th>Domain</th>
-                    <th>Client IP</th>
-                    <th>Status</th>
-                    <th>Response Time</th>
-                    <th>Timestamp</th>
-                  </tr>
-                </thead>
-
-                <tbody>
-
-                  {queries.map((q) => (
-
-                    <tr key={q.id}>
-
-                      <td>{q.domain}</td>
-                      <td>{q.client_ip}</td>
-
-                      <td>
-                        <span className={`status ${(
-                          q.status || "ERROR"
-                        ).toLowerCase()}`}>
-                          {q.status}
-                        </span>
-                      </td>
-
-                      <td>{q.response_time} ms</td>
-                      <td>{formatTime(q.timestamp)}</td>
-
-                    </tr>
-
-                  ))}
-
-                </tbody>
-
-              </table>
-
-            </div>
-
-          )}
-
-        </section>
-
-      </main>
-
-
-      <footer>
-        IntelliDNS | DNS Security Monitoring Platform
-      </footer>
-
-    </div>
-
-  );
-
+    );
 }
 
 export default App;

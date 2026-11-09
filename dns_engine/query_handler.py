@@ -1,3 +1,6 @@
+from pathlib import Path
+from threat_intelligence.blacklist import DomainBlacklist
+from threat_intelligence.stix_feed import STIXFeedLoader
 import logging
 import time
 import threading
@@ -18,6 +21,8 @@ from monitoring.threat_store import (
     save_threat_event
 )
 
+from dns_engine.cache import DNSCache
+
 from security.alert_manager import AlertManager
 from security.rate_limiter import RateLimiter
 from security.advanced_detector import AdvancedThreatDetector
@@ -29,49 +34,38 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("IntelliDNS")
 
 
-class DNSCache:
-
-    def __init__(self, ttl=60):
-        self.ttl = ttl
-        self.cache = {}
-        self.lock = threading.Lock()
-
-    def get(self, domain, qtype):
-        key = (domain, qtype)
-
-        with self.lock:
-            item = self.cache.get(key)
-
-            if not item:
-                return None
-
-            data, expiry = item
-
-            if time.time() > expiry:
-                del self.cache[key]
-                return None
-
-            return data
-
-    def set(self, domain, qtype, data):
-        key = (domain, qtype)
-
-        with self.lock:
-            self.cache[key] = (
-                data,
-                time.time() + self.ttl
-            )
-
-
 class IntelliDNSResolver:
 
     def __init__(self):
+
         initialize_database()
         initialize_threat_store()
 
-        self.cache = DNSCache()
+        self.cache = DNSCache(max_size=10000)
+
         self.rate_limiter = RateLimiter()
         self.threat_detector = AdvancedThreatDetector()
+                # Local blacklist and STIX threat intelligence
+        self.blacklist = DomainBlacklist()
+        self.stix_loader = STIXFeedLoader()
+
+        feed_path = (
+            Path(__file__).resolve().parent.parent
+            / "threat_intelligence"
+            / "feeds"
+            / "local_stix_bundle.json"
+        )
+
+        self.stix_domains = self.stix_loader.load_domains(
+            str(feed_path)
+        )
+
+        self.blacklist.add_domains(self.stix_domains)
+
+        logger.info(
+            "THREAT INTELLIGENCE LOADED | DOMAINS=%d",
+            len(self.blacklist.get_domains())
+        )
 
         self.alert_manager = AlertManager()
 
@@ -93,44 +87,59 @@ class IntelliDNSResolver:
         severity,
         details
     ):
-        self.alert_manager.raise_alert(
-            alert_type,
-            client_ip,
-            domain,
-            severity,
-            details
-        )
+
+        try:
+            self.alert_manager.raise_alert(
+                alert_type,
+                client_ip,
+                domain,
+                severity,
+                details
+            )
+        except Exception as error:
+            logger.error("Alert creation failed: %s", error)
 
     def make_response(self, data, rcode):
+
         request = DNSRecord.parse(data)
+
         response = request.reply()
         response.header.rcode = rcode
 
         return response.pack()
 
     def process_query(self, data, client_ip):
+
         start_time = time.time()
 
         domain = "unknown"
         status = "ERROR"
 
         try:
+
+            # Parse incoming DNS packet.
+
             request = DNSRecord.parse(data)
 
             if not request.questions:
+                status = "INVALID"
+
                 return self.make_response(data, 1)
 
             question = request.questions[0]
 
             domain = str(question.qname).lower().rstrip(".")
+
             qtype = question.qtype
+            qclass = question.qclass
 
             with self.stats_lock:
                 self.total_queries += 1
 
-            # Check persistent IP blocks.
+            # Persistent IP block check.
 
             if is_ip_blocked(client_ip):
+
                 with self.stats_lock:
                     self.blocked_queries += 1
 
@@ -146,13 +155,14 @@ class IntelliDNSResolver:
 
                 return self.make_response(data, 5)
 
-            # Correctly handle RateLimiter's tuple response.
+            # Rate limiting.
 
             allowed, retry_after = self.rate_limiter.allow_request(
                 client_ip
             )
 
             if not allowed:
+
                 with self.stats_lock:
                     self.blocked_queries += 1
 
@@ -170,8 +180,63 @@ class IntelliDNSResolver:
                 )
 
                 return self.make_response(data, 5)
+                        # STIX and local blacklist detection
 
-            # Advanced threat analysis.
+            if self.blacklist.is_blocked(domain):
+
+                with self.stats_lock:
+                    self.blocked_queries += 1
+
+                is_stix = any(
+                    domain == item or domain.endswith("." + item)
+                    for item in self.stix_domains
+                )
+
+                category = (
+                    "STIX_BLACKLIST"
+                    if is_stix
+                    else "LOCAL_BLACKLIST"
+                )
+
+                threat_event = {
+                    "client_ip": client_ip,
+                    "domain": domain,
+                    "risk_score": 100,
+                    "severity": "CRITICAL",
+                    "category": category,
+                    "is_suspicious": True,
+                    "reasons": [
+                        "Domain matched threat intelligence blacklist",
+                        "DNS resolution blocked"
+                    ]
+                }
+
+                try:
+                    save_threat_event(threat_event)
+                except Exception as error:
+                    logger.error(
+                        "Threat event storage failed: %s", error
+                    )
+
+                self.create_alert(
+                    "threat_intelligence_block",
+                    client_ip,
+                    domain,
+                    "CRITICAL",
+                    threat_event
+                )
+
+                status = "BLOCKED"
+
+                logger.warning(
+                    "THREAT INTEL BLOCK | DOMAIN=%s | CATEGORY=%s",
+                    domain,
+                    category
+                )
+
+                return self.make_response(data, 3)
+
+            # Advanced threat detection.
 
             threat_result = self.threat_detector.analyze(
                 client_ip=client_ip,
@@ -186,7 +251,13 @@ class IntelliDNSResolver:
 
                 threat_result["category"] = "ADVANCED_DNS_THREAT"
 
-                save_threat_event(threat_result)
+                try:
+                    save_threat_event(threat_result)
+                except Exception as error:
+                    logger.error(
+                        "Threat event storage failed: %s",
+                        error
+                    )
 
                 self.create_alert(
                     "advanced_dns_threat",
@@ -203,8 +274,7 @@ class IntelliDNSResolver:
                     risk_score
                 )
 
-            # Automatically block only at very high risk.
-            # Existing active blocks are not recreated.
+            # Automatic IP blocking.
 
             if risk_score >= 90 and not is_ip_blocked(client_ip):
 
@@ -232,19 +302,24 @@ class IntelliDNSResolver:
 
                 return self.make_response(data, 5)
 
-            # Cache lookup.
+            # Cache key includes domain, query type and query class.
 
-            cached_response = self.cache.get(domain, qtype)
+            cache_key = (
+                domain,
+                qtype,
+                qclass
+            )
+
+            cached_response = self.cache.get(
+                cache_key,
+                request.header.id
+            )
 
             if cached_response:
-                cached_record = DNSRecord.parse(cached_response)
-
-                # Preserve the current DNS transaction ID.
-                cached_record.header.id = request.header.id
 
                 status = "CACHED"
 
-                return cached_record.pack()
+                return cached_response
 
             # Resolve through Cloudflare DNS.
 
@@ -257,8 +332,7 @@ class IntelliDNSResolver:
             response_data = response.to_wire()
 
             self.cache.set(
-                domain,
-                qtype,
+                cache_key,
                 response_data
             )
 
@@ -267,6 +341,7 @@ class IntelliDNSResolver:
             return response_data
 
         except Exception as error:
+
             logger.error(
                 "DNS resolver error: %s",
                 error
@@ -283,6 +358,7 @@ class IntelliDNSResolver:
                 return b""
 
         finally:
+
             elapsed = time.time() - start_time
 
             try:
@@ -293,16 +369,22 @@ class IntelliDNSResolver:
                     elapsed
                 )
             except Exception as error:
+
                 logger.error(
                     "Could not save DNS query: %s",
                     error
                 )
 
     def get_stats(self):
+
         with self.stats_lock:
-            return {
+
+            stats = {
                 "total_queries": self.total_queries,
                 "blocked_queries": self.blocked_queries,
-                "failed_queries": self.failed_queries,
-                "cache_entries": len(self.cache.cache)
+                "failed_queries": self.failed_queries
             }
+
+        stats["cache"] = self.cache.get_stats()
+
+        return stats

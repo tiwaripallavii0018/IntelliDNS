@@ -7,10 +7,12 @@ from dnslib import DNSRecord
 class DNSCache:
 
     def __init__(self, max_size=10000):
-
         self.cache = {}
         self.max_size = max_size
         self.lock = threading.Lock()
+
+        self.hits = 0
+        self.misses = 0
 
     def get(self, key, request_id):
 
@@ -19,6 +21,7 @@ class DNSCache:
             entry = self.cache.get(key)
 
             if entry is None:
+                self.misses += 1
                 return None
 
             response_data, created_at, ttl = entry
@@ -27,18 +30,24 @@ class DNSCache:
 
             if elapsed >= ttl:
                 del self.cache[key]
+                self.misses += 1
                 return None
 
             response = DNSRecord.parse(response_data)
 
-            # DNS transaction ID must match the current request.
             response.header.id = request_id
 
-            # Reduce the remaining TTL.
             remaining = max(0, int(ttl - elapsed))
 
-            for record in response.rr:
-                record.ttl = min(record.ttl, remaining)
+            for section in (
+                response.rr,
+                response.auth,
+                response.ar
+            ):
+                for record in section:
+                    record.ttl = min(record.ttl, remaining)
+
+            self.hits += 1
 
             return response.pack()
 
@@ -46,7 +55,6 @@ class DNSCache:
 
         response = DNSRecord.parse(response_data)
 
-        # Cache only successful responses with answer records.
         if response.header.rcode != 0 or not response.rr:
             return
 
@@ -57,8 +65,10 @@ class DNSCache:
 
         with self.lock:
 
-            if len(self.cache) >= self.max_size:
-                self.cache.pop(next(iter(self.cache)))
+            if key not in self.cache and len(self.cache) >= self.max_size:
+                if self.cache:
+                    oldest_key = next(iter(self.cache))
+                    del self.cache[oldest_key]
 
             self.cache[key] = (
                 response_data,
@@ -70,3 +80,14 @@ class DNSCache:
 
         with self.lock:
             self.cache.clear()
+            self.hits = 0
+            self.misses = 0
+
+    def get_stats(self):
+
+        with self.lock:
+            return {
+                "entries": len(self.cache),
+                "hits": self.hits,
+                "misses": self.misses
+            }

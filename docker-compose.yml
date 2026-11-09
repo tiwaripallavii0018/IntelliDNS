@@ -1,0 +1,60 @@
+services:
+
+  dns:
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    container_name: intellidns-dns
+
+    command: python main.py
+
+    environment:
+      DNS_HOST: 0.0.0.0
+      DNS_PORT: 5353
+
+    ports:
+      - "5354:5353/udp"
+
+    volumes:
+      - ./intellidns.db:/app/intellidns.db
+      - ./logs:/app/logs
+
+    restart: unless-stopped
+
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    container_name: intellidns-api
+
+    command: uvicorn api.server:app --host 0.0.0.0 --port 8000
+
+    expose:
+      - "8000"
+
+    volumes:
+      - ./intellidns.db:/app/intellidns.db
+      - ./logs:/app/logs
+
+    restart: unless-stopped
+
+
+  dashboard:
+    build:
+      context: ./dashboard
+      dockerfile: Dockerfile
+      args:
+        VITE_API_URL: ""
+
+    container_name: intellidns-dashboard
+
+    ports:
+      - "8080:80"
+
+    depends_on:
+      - api
+
+    restart: unless-stopped

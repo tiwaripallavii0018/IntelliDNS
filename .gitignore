@@ -1,5 +1,4 @@
-@'
-__pycache__/
+﻿__pycache__/
 *.py[cod]
 venv/
 .env
@@ -8,4 +7,3 @@ dashboard/dist/
 logs/
 *.log
 intellidns.db
-'@ | Set-Content .gitignore

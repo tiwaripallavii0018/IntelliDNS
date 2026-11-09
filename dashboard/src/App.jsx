@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import ThreatPanel from "./ThreatPanel";
 import "./App.css";
 
 const API = "http://127.0.0.1:8000";
@@ -484,6 +485,7 @@ function App() {
                         </div>
                     </div>
                 </section>
+                <ThreatPanel />
 
                 <footer>
                     IntelliDNS | Automated Threat Response & Incident Management

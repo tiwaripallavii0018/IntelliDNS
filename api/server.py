@@ -1,6 +1,6 @@
 import ipaddress
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -18,26 +18,38 @@ from monitoring.database import (
     get_ip_blocks
 )
 
+from monitoring.threat_store import (
+    initialize_threat_store,
+    get_threat_events,
+    get_threat_analytics
+)
+
 from security.response_manager import ThreatResponseManager
 
 
 app = FastAPI(
     title="IntelliDNS API",
     description="Intelligent DNS Security and Threat Response",
-    version="2.0.0"
+    version="3.0.0"
 )
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_origins=[
+        "http://localhost:5173",
+        "http://127.0.0.1:5173"
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"]
 )
 
 initialize_database()
+initialize_threat_store()
 
-response_manager = ThreatResponseManager(default_block_duration=300)
+response_manager = ThreatResponseManager(
+    default_block_duration=300
+)
 
 
 class BlockIPRequest(BaseModel):
@@ -54,7 +66,10 @@ def validate_ip(ip):
     try:
         return str(ipaddress.ip_address(ip))
     except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid IP address")
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid IP address"
+        )
 
 
 @app.get("/")
@@ -62,7 +77,7 @@ def home():
     return {
         "name": "IntelliDNS",
         "status": "running",
-        "version": "2.0.0"
+        "version": "3.0.0"
     }
 
 
@@ -72,17 +87,17 @@ def stats():
 
 
 @app.get("/api/queries")
-def queries(limit: int = 100):
+def queries(limit: int = Query(default=100, ge=1, le=500)):
     return get_recent_queries(limit)
 
 
 @app.get("/api/top-domains")
-def top_domains(limit: int = 10):
+def top_domains(limit: int = Query(default=10, ge=1, le=100)):
     return get_top_domains(limit)
 
 
 @app.get("/api/alerts")
-def alerts(limit: int = 50):
+def alerts(limit: int = Query(default=50, ge=1, le=500)):
     return get_recent_alerts(limit)
 
 
@@ -92,7 +107,10 @@ def security_stats():
 
 
 @app.get("/api/incidents")
-def incidents(status: str = None, limit: int = 100):
+def incidents(
+    status: str = None,
+    limit: int = Query(default=100, ge=1, le=500)
+):
     allowed = ["OPEN", "ACKNOWLEDGED", "RESOLVED"]
 
     if status and status.upper() not in allowed:
@@ -101,7 +119,10 @@ def incidents(status: str = None, limit: int = 100):
             detail="Invalid incident status"
         )
 
-    return get_incidents(status.upper() if status else None, limit)
+    return get_incidents(
+        status.upper() if status else None,
+        limit
+    )
 
 
 @app.get("/api/incidents/{incident_id}")
@@ -109,7 +130,10 @@ def incident_detail(incident_id: int):
     incident = get_incident(incident_id)
 
     if not incident:
-        raise HTTPException(status_code=404, detail="Incident not found")
+        raise HTTPException(
+            status_code=404,
+            detail="Incident not found"
+        )
 
     return incident
 
@@ -119,7 +143,10 @@ def acknowledge(incident_id: int):
     incident = get_incident(incident_id)
 
     if not incident:
-        raise HTTPException(status_code=404, detail="Incident not found")
+        raise HTTPException(
+            status_code=404,
+            detail="Incident not found"
+        )
 
     if incident["status"] != "OPEN":
         raise HTTPException(
@@ -136,11 +163,17 @@ def acknowledge(incident_id: int):
 
 
 @app.post("/api/incidents/{incident_id}/resolve")
-def resolve(incident_id: int, request: ResolveRequest):
+def resolve(
+    incident_id: int,
+    request: ResolveRequest
+):
     incident = get_incident(incident_id)
 
     if not incident:
-        raise HTTPException(status_code=404, detail="Incident not found")
+        raise HTTPException(
+            status_code=404,
+            detail="Incident not found"
+        )
 
     if incident["status"] == "RESOLVED":
         raise HTTPException(
@@ -148,7 +181,10 @@ def resolve(incident_id: int, request: ResolveRequest):
             detail="Incident is already resolved"
         )
 
-    resolve_incident(incident_id, request.note)
+    resolve_incident(
+        incident_id,
+        request.note
+    )
 
     return {
         "message": "Incident resolved",
@@ -193,3 +229,31 @@ def unblock_ip(client_ip: str):
 @app.get("/api/ip-block-history")
 def ip_block_history():
     return get_ip_blocks()
+
+
+# ----------------------------------
+# PHASE 6: ADVANCED THREAT ENDPOINTS
+# ----------------------------------
+
+@app.get("/api/threat-events")
+def threat_events(
+    limit: int = Query(default=100, ge=1, le=500)
+):
+    return get_threat_events(limit)
+
+
+@app.get("/api/threat-analytics")
+def threat_analytics():
+    return get_threat_analytics()
+
+
+@app.get("/api/threat-health")
+def threat_health():
+    analytics = get_threat_analytics()
+
+    return {
+        "status": "active",
+        "total_threat_events": analytics["total_threat_events"],
+        "severity_levels": analytics["severity"],
+        "categories": analytics["categories"]
+    }

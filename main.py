@@ -2,7 +2,7 @@ import os
 import logging
 import socketserver
 
-from dns_engine.resolver import IntelliDNSResolver
+from dns_engine.query_handler import IntelliDNSResolver
 
 
 # Create logs directory.

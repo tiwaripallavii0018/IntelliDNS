@@ -1,4 +1,6 @@
+
 # IntelliDNS 🔐
+
 ### Intelligent DNS Security and Threat Intelligence Platform
 
 IntelliDNS is an intelligent DNS security platform designed to monitor DNS queries, detect suspicious domains, identify potential DNS-based attacks, and block known malicious destinations using threat intelligence.
@@ -10,6 +12,7 @@ The platform combines a custom DNS engine, STIX-based threat intelligence, advan
 ## 🚀 Key Features
 
 ### 1. DNS Core
+
 - DNS query handling over UDP.
 - Domain resolution and response processing.
 - DNS response caching with TTL management.
@@ -17,6 +20,7 @@ The platform combines a custom DNS engine, STIX-based threat intelligence, advan
 - DNS response validation.
 
 ### 2. Threat Intelligence
+
 - Local domain blacklist.
 - STIX threat intelligence feed integration.
 - Automatic extraction of malicious domain indicators.
@@ -24,6 +28,7 @@ The platform combines a custom DNS engine, STIX-based threat intelligence, advan
 - Blocking of matching malicious domains.
 
 ### 3. Advanced Security
+
 - Rate limiting for DNS clients.
 - Suspicious domain analysis.
 - DGA-like domain detection using heuristic analysis.
@@ -33,6 +38,7 @@ The platform combines a custom DNS engine, STIX-based threat intelligence, advan
 - Risk scoring and severity classification.
 
 ### 4. Monitoring and Analytics
+
 - DNS threat event storage.
 - Threat event history.
 - Severity-based threat statistics.
@@ -42,6 +48,7 @@ The platform combines a custom DNS engine, STIX-based threat intelligence, advan
 - API-based analytics.
 
 ### 5. Web Dashboard
+
 - React-based monitoring dashboard.
 - Security monitoring panels.
 - Threat analytics and event visualization.
@@ -49,6 +56,7 @@ The platform combines a custom DNS engine, STIX-based threat intelligence, advan
 - Nginx reverse proxy for API requests.
 
 ### 6. Docker Deployment
+
 - Containerized DNS service.
 - Containerized FastAPI backend.
 - Containerized React dashboard.
@@ -59,17 +67,17 @@ The platform combines a custom DNS engine, STIX-based threat intelligence, advan
 
 ## 🛠️ Technology Stack
 
-| Component | Technology |
-|---|---|
-| DNS Engine | Python, dnslib |
-| Backend | FastAPI |
-| Frontend | React, Vite |
-| Web Server | Nginx |
-| Database | SQLite |
-| Threat Intelligence | STIX |
-| Security | Rate Limiting, DGA Heuristics, DNS Tunneling Detection |
-| Containerization | Docker, Docker Compose |
-| Testing | Python unittest |
+| Component           | Technology                                             |
+| ------------------- | ------------------------------------------------------ |
+| DNS Engine          | Python, dnslib                                         |
+| Backend             | FastAPI                                                |
+| Frontend            | React, Vite                                            |
+| Web Server          | Nginx                                                  |
+| Database            | SQLite                                                 |
+| Threat Intelligence | STIX                                                   |
+| Security            | Rate Limiting, DGA Heuristics, DNS Tunneling Detection |
+| Containerization    | Docker, Docker Compose                                 |
+| Testing             | Python unittest                                        |
 
 ---
 
@@ -128,7 +136,7 @@ IntelliDNS/
 │   ├── blacklist.py
 │   └── stix_feed.py
 │
-├── logs/
+├── logs/                  # Created at runtime
 ├── main.py
 ├── requirements.txt
 ├── Dockerfile
@@ -142,6 +150,7 @@ IntelliDNS/
 ## ⚙️ Local Installation and Setup
 
 ### Prerequisites
+
 - Python 3.10+
 - Node.js and npm
 - Git
@@ -208,6 +217,7 @@ http://localhost:5173
 ## 🐳 Docker Deployment
 
 ### Prerequisites
+
 - Docker Desktop
 - Docker Compose
 
@@ -246,14 +256,14 @@ docker compose ps
 
 ### 5. Access the services
 
-| Service | Address |
-|---|---|
-| Web Dashboard | http://localhost:8080 |
-| Backend API | http://localhost:8000 |
+| Service           | Address                    |
+| ----------------- | -------------------------- |
+| Web Dashboard     | http://localhost:8080      |
+| Backend API       | http://localhost:8000      |
 | API Documentation | http://localhost:8000/docs |
-| DNS Server | localhost:5354 (UDP) |
+| DNS Server        | localhost:5354 (UDP)       |
 
-**Docker DNS port mapping:** Host UDP port `5354` maps to container UDP port `5353`. This avoids conflicts with applications already using port `5353`.
+**Docker DNS port mapping:** Host UDP port `5354` maps to container UDP port `5353`. This avoids conflicts with applications already using the host DNS port.
 
 The dashboard communicates with the backend through the Nginx reverse proxy.
 
@@ -320,11 +330,11 @@ npm run build
 
 ## 🔌 Backend API Endpoints
 
-| Endpoint | Description |
-|---|---|
-| `/api/threat-events` | Retrieves recent threat events |
-| `/api/threat-analytics` | Provides threat analytics |
-| `/api/threat-health` | Checks threat monitoring health |
+| Endpoint                  | Description                     |
+| ------------------------- | ------------------------------- |
+| `/api/threat-events`    | Retrieves recent threat events  |
+| `/api/threat-analytics` | Provides threat analytics       |
+| `/api/threat-health`    | Checks threat monitoring health |
 
 Interactive API documentation:
 
